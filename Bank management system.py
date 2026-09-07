@@ -1,5 +1,6 @@
 import sqlite3
 import hashlib
+from getpass import getpass
 
 # ---------------- Utility ----------------
 def hash_password(password):
@@ -24,7 +25,7 @@ def get_username(prompt):
 
 def get_password(prompt):
     while True:
-        password = input(prompt)
+        password = getpass(prompt)
 
         if password == "":
             print("Password cannot be empty!")
@@ -57,7 +58,8 @@ def setup_database():
         id INTEGER PRIMARY KEY,
         username TEXT NOT NULL UNIQUE,
         password TEXT NOT NULL,
-        balance REAL NOT NULL CHECK(balance >= 0)
+        balance REAL NOT NULL CHECK(balance >= 0),
+        status TEXT NOT NULL DEFAULT 'active'
     )
     """)
     connection.execute("""
@@ -116,122 +118,137 @@ def login():
     else:
         print(f"Welcome {row[1]}! Your current balance is: ₹{row[3]:.2f}")
         return connection, row, username_input
-
 # ---------------- Deposit ----------------
 def deposit(connection, row, username_input):
-    
-
     amount = get_amount("Enter the amount to deposit: ")
 
     new_balance = row[3] + amount
 
-    connection.execute(
-        "UPDATE accounts SET balance = ? WHERE username = ?",
-        (new_balance, username_input)
-    )
+    try:
+        connection.execute(
+            "UPDATE accounts SET balance = ? WHERE username = ?",
+            (new_balance, username_input)
+        )
 
-    connection.execute(
-        "INSERT INTO transactions (account_id, type, amount, details) VALUES (?, ?, ?, ?)",
-        (row[0], "Deposit", amount, "Deposited to own account")
-    )
+        connection.execute(
+            "INSERT INTO transactions (account_id, type, amount, details) VALUES (?, ?, ?, ?)",
+            (row[0], "Deposit", amount, "Deposited to own account")
+        )
 
-    connection.commit()
+        connection.commit()
 
-    row = (row[0], row[1], row[2], new_balance)
+    except sqlite3.Error:
+        connection.rollback()
+        print("Deposit failed. Please try again.")
 
-    print(f"Deposited ₹{amount}. New balance is: ₹{new_balance:.2f}")
+    else:
+        row = (row[0], row[1], row[2], new_balance)
+        print(f"Deposited ₹{amount}. New balance is: ₹{new_balance:.2f}")
 
     return row
+
 
 # ---------------- Withdraw ----------------
 def withdraw(connection, row, username_input):
+    amount = get_amount("Enter the amount to withdraw: ")
+
+    if amount > row[3]:
+        print("Insufficient funds!")
+        return row
+
+    new_balance = row[3] - amount
+
     try:
-        amount = get_amount("Enter the amount to withdraw: ")
-        if amount <= 0:
-            print("Withdrawal amount must be positive!")
-        elif amount > row[3]:
-            print("Insufficient funds!")
-        else:
-            new_balance = row[3] - amount
-            connection.execute(
-                "UPDATE accounts SET balance = ? WHERE username = ?",
-                (new_balance, username_input)
-            )
-            connection.execute(
-                "INSERT INTO transactions (account_id, type, amount, details) VALUES (?, ?, ?, ?)",
-                (row[0], "Withdrawal", amount, "Withdrawn from own account")
-            )
-            connection.commit()
-            row = (row[0], row[1], row[2], new_balance)
-            print(f"Withdrew ₹{amount}. New balance is: ₹{new_balance:.2f}")
-    except ValueError:
-        print("Invalid amount! Please enter a valid number.")
+        connection.execute(
+            "UPDATE accounts SET balance = ? WHERE username = ?",
+            (new_balance, username_input)
+        )
+
+        connection.execute(
+            "INSERT INTO transactions (account_id, type, amount, details) VALUES (?, ?, ?, ?)",
+            (row[0], "Withdrawal", amount, "Withdrawn from own account")
+        )
+
+        connection.commit()
+
+    except sqlite3.Error:
+        connection.rollback()
+        print("Withdrawal failed. Please try again.")
+
+    else:
+        row = (row[0], row[1], row[2], new_balance)
+        print(f"Withdrew ₹{amount}. New balance is: ₹{new_balance:.2f}")
+
     return row
+
 
 # ---------------- Transfer ----------------
 def transfer(connection, row, username_input):
     recipient_username = get_username("Enter the recipient's username: ")
+
+    if recipient_username == username_input:
+        print("You cannot transfer money to yourself!")
+        return row
+
+    amount = get_amount("Enter the amount to transfer: ")
+
+    if amount > row[3]:
+        print("Insufficient funds!")
+        return row
+
+    cursor = connection.execute(
+        "SELECT * FROM accounts WHERE username = ?",
+        (recipient_username,)
+    )
+
+    recipient_row = cursor.fetchone()
+
+    if recipient_row is None:
+        print("Recipient account does not exist!")
+        return row
+
+    new_balance_sender = row[3] - amount
+    new_balance_recipient = recipient_row[3] + amount
+
     try:
-        amount = get_amount("Enter the amount to transfer: ")
-        if amount <= 0:
-            print("Transfer amount must be positive!")
-        elif amount > row[3]:
-            print("Insufficient funds!")
-        else:
-            cursor = connection.execute(
-                "SELECT * FROM accounts WHERE username = ?",
-                (recipient_username,)
-            )
-            recipient_row = cursor.fetchone()
+        # Update sender
+        connection.execute(
+            "UPDATE accounts SET balance = ? WHERE username = ?",
+            (new_balance_sender, username_input)
+        )
 
-            if recipient_row is None:
-                print("Recipient account does not exist!")
-            else:
-                new_balance_sender = row[3] - amount
-                new_balance_recipient = recipient_row[3] + amount
+        # Update recipient
+        connection.execute(
+            "UPDATE accounts SET balance = ? WHERE username = ?",
+            (new_balance_recipient, recipient_username)
+        )
 
-                try:
-                    # Update sender
-                    connection.execute(
-                        "UPDATE accounts SET balance = ? WHERE username = ?",
-                        (new_balance_sender, username_input)
-                    )
+        # Record transaction for sender
+        connection.execute(
+            "INSERT INTO transactions (account_id, type, amount, details) VALUES (?, ?, ?, ?)",
+            (row[0], "Transfer", amount, f"→ {recipient_username}")
+        )
 
-                    # Update recipient
-                    connection.execute(
-                        "UPDATE accounts SET balance = ? WHERE username = ?",
-                        (new_balance_recipient, recipient_username)
-                    )
+        # Record transaction for recipient
+        connection.execute(
+            "INSERT INTO transactions (account_id, type, amount, details) VALUES (?, ?, ?, ?)",
+            (recipient_row[0], "Transfer Received", amount, f"← {username_input}")
+        )
 
-                    # Record sender transaction
-                    connection.execute(
-                        "INSERT INTO transactions (account_id, type, amount, details) VALUES (?, ?, ?, ?)",
-                        (row[0], "Transfer", amount, f"→ {recipient_username}")
-                    )
+        connection.commit()
 
-                    # Record recipient transaction
-                    connection.execute(
-                        "INSERT INTO transactions (account_id, type, amount, details) VALUES (?, ?, ?, ?)",
-                        (recipient_row[0], "Transfer Received", amount, f"← {username_input}")
-                    )
+    except sqlite3.Error:
+        connection.rollback()
+        print("Transaction failed. Please try again.")
 
-                    connection.commit()
+    else:
+        row = (row[0], row[1], row[2], new_balance_sender)
+        print(
+            f"Transferred ₹{amount} to {recipient_username}. "
+            f"New balance is: ₹{new_balance_sender:.2f}"
+        )
 
-                except sqlite3.Error:
-                    connection.rollback()
-                    print("Transaction failed. Please try again.")
-
-                else:
-                    row = (row[0], row[1], row[2], new_balance_sender)
-                    print(
-                        f"Transferred ₹{amount} to {recipient_username}. "
-                        f"New balance is: ₹{new_balance_sender:.2f}"
-                    )
-    except ValueError:
-        print("Invalid amount! Please enter a valid number.")
     return row
-
-
 # ---------------- Transaction History ----------------
 def transaction_history(connection, row):
     cursor = connection.execute("""
@@ -275,6 +292,137 @@ def change_password(connection, row, username_input):
             )
             connection.commit()
             print("Password changed successfully!")
+# -------------change username----------------
+def change_username(connection, row, username_input):
+    new_username = get_username("Enter new username: ")
+    if new_username == username_input:
+        print("New username cannot be the same as the current username!")
+    else:
+        try:
+            connection.execute(
+                "UPDATE accounts SET username = ? WHERE username = ?",
+                (new_username, username_input)
+            )
+            connection.commit()
+            print(f"Username changed successfully to {new_username}!")
+            return new_username  # Return the new username for further operations
+        except sqlite3.IntegrityError:
+            print("Username already exists. Please choose another.")
+    return username_input  # Return the original username if change failed
+# ------- Deactivate Account ----------------
+def deactivate_account(connection, row, username_input):
+
+    confirmation = input(
+        "Are you sure you want to deactivate your account? (yes/no): "
+    ).strip().lower()
+
+    if confirmation != "yes":
+        print("Account deactivation canceled.")
+        return False
+
+    # If money is still present
+    if row[3] > 0:
+
+        print(f"Your current balance is: ₹{row[3]:.2f}")
+
+        withdraw_confirmation = input(
+            "Would you like to withdraw your remaining balance? (yes/no): "
+        ).strip().lower()
+
+        if withdraw_confirmation != "yes":
+            print("Account deactivation canceled. Please withdraw your balance first.")
+            return False
+
+        remaining_balance = row[3]
+
+        try:
+            # Withdraw remaining balance
+            connection.execute(
+                "UPDATE accounts SET balance = ? WHERE username = ?",
+                (0, username_input)
+            )
+
+            # Record the withdrawal
+            connection.execute(
+                """
+                INSERT INTO transactions
+                (account_id, type, amount, details)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    row[0],
+                    "Withdrawal",
+                    remaining_balance,
+                    "Final withdrawal before account deactivation"
+                )
+            )
+
+            connection.commit()
+
+            print(
+                f"₹{remaining_balance:.2f} withdrawn successfully."
+            )
+
+            # Update current row
+            row = (row[0], row[1], row[2], 0)
+
+        except sqlite3.Error:
+            connection.rollback()
+            print("Failed to withdraw your balance. Account was not deactivated.")
+            return False
+
+    # At this point balance is definitely 0
+    try:
+        connection.execute(
+            "DELETE FROM accounts WHERE username = ?",
+            (username_input,)
+        )
+
+        connection.execute(
+            "DELETE FROM transactions WHERE account_id = ?",
+            (row[0],)
+        )
+
+        connection.commit()
+
+        print("Account deactivated successfully. Goodbye!")
+        return True
+
+    except sqlite3.Error:
+        connection.rollback()
+        print("Failed to deactivate account. Please try again.")
+        return False
+# ----------------- profile settings----------------
+def profile_settings(connection, row, username_input):
+    while True:
+        print("\n========== PROFILE SETTINGS ==========")
+        print("1. Account Details")
+        print("2. Change Password")
+        print("3. Change Username")
+        print("4. Deactivate Account")
+        print("5. Back to Service Menu")
+
+        choice = input("Enter your choice (1-5): ")
+
+        if choice == "1":
+            account_details(row)
+
+        elif choice == "2":
+            change_password(connection, row, username_input)
+
+        elif choice == "3":
+            username_input = change_username(connection, row, username_input)
+
+        elif choice == "4":
+            if deactivate_account(connection, row, username_input): 
+              return True 
+    
+        elif choice == "5":
+            break  # Exit profile settings
+
+        else:
+            print("Invalid choice! Please select a valid option.")
+    return False  # Return False if account was not deactivated
 # ---------------- Service Menu ----------------
 def service_menu(connection, row, username_input):
 
@@ -285,7 +433,7 @@ def service_menu(connection, row, username_input):
         print("3. Transfer")
         print("4. Transaction History")
         print("5. Account Details")
-        print("6. Change Password")
+        print("6. Profile Settings")
         print("7. Logout")
 
         choice = input("Enter your choice (1-7): ")
@@ -306,11 +454,18 @@ def service_menu(connection, row, username_input):
             account_details(row)
 
         elif choice == "6":
-            change_password(connection, row, username_input)
+           account_deactivated = profile_settings(
+           connection, row, username_input 
+           )
+         
+           if account_deactivated:
+                  return
 
         elif choice == "7":
             print("You have been logged out.")
             break
+
+        
 
         else:
             print("Invalid choice! Please select a valid option.")
